@@ -48,6 +48,39 @@ def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
     return emb
 
 
+
+def get_3d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
+    if isinstance(grid_size, int):
+        grid_d, grid_h, grid_w = grid_size, grid_size, grid_size
+    else:
+        grid_d, grid_h, grid_w = grid_size
+
+    grid_d_arr = np.arange(grid_d, dtype=float)
+    grid_h_arr = np.arange(grid_h, dtype=float)
+    grid_w_arr = np.arange(grid_w, dtype=float)
+    
+    grid = np.meshgrid(grid_d_arr, grid_h_arr, grid_w_arr, indexing='ij')
+    grid = np.stack(grid, axis=0)
+
+    grid = grid.reshape([3, 1, grid_d, grid_h, grid_w])
+    pos_embed = get_3d_sincos_pos_embed_from_grid(embed_dim, grid)
+    if cls_token:
+        pos_embed = np.concatenate([np.zeros([1, embed_dim]), pos_embed], axis=0)
+    return pos_embed
+
+def get_3d_sincos_pos_embed_from_grid(embed_dim, grid):
+    dim_d = embed_dim // 3
+    dim_h = embed_dim // 3
+    dim_w = embed_dim - dim_d - dim_h
+
+    emb_d = get_1d_sincos_pos_embed_from_grid(dim_d, grid[0])
+    emb_h = get_1d_sincos_pos_embed_from_grid(dim_h, grid[1])
+    emb_w = get_1d_sincos_pos_embed_from_grid(dim_w, grid[2])
+
+    emb = np.concatenate([emb_d, emb_h, emb_w], axis=1)
+    return emb
+
+
 def get_1d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
     """
     grid_size: int of the grid length
@@ -189,6 +222,29 @@ class PatchEmbed(nn.Module):
         return x
 
 
+
+class PatchEmbed3D(nn.Module):
+    """ 3D Volume to Patch Embedding """
+    def __init__(self, img_size=(120, 160, 160), patch_size=(10, 16, 16), in_chans=1, embed_dim=768):
+        super().__init__()
+        
+        if isinstance(img_size, int):
+            img_size = (img_size, img_size, img_size)
+        if isinstance(patch_size, int):
+            patch_size = (patch_size, patch_size, patch_size)
+            
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1], img_size[2] // patch_size[2])
+        self.num_patches = self.grid_size[0] * self.grid_size[1] * self.grid_size[2]
+
+        self.proj = nn.Conv3d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+
+    def forward(self, x):
+        B, C, D, H, W = x.shape
+        x = self.proj(x).flatten(2).transpose(1, 2)
+        return x
+
 class ConvEmbed(nn.Module):
     """
     3x3 Convolution stems for ViT following ViTC models
@@ -243,8 +299,8 @@ class VisionTransformerPredictor(nn.Module):
         # --
         self.predictor_pos_embed = nn.Parameter(torch.zeros(1, num_patches, predictor_embed_dim),
                                                 requires_grad=False)
-        predictor_pos_embed = get_2d_sincos_pos_embed(self.predictor_pos_embed.shape[-1],
-                                                      int(num_patches**.5),
+        predictor_pos_embed = get_3d_sincos_pos_embed(self.predictor_pos_embed.shape[-1],
+                                                      kwargs.get('predictor_grid_size', (12, 10, 10)),
                                                       cls_token=False)
         self.predictor_pos_embed.data.copy_(torch.from_numpy(predictor_pos_embed).float().unsqueeze(0))
         # --
@@ -330,7 +386,7 @@ class VisionTransformer(nn.Module):
     """ Vision Transformer """
     def __init__(
         self,
-        img_size=[224],
+        img_size=[120, 160, 160],
         patch_size=16,
         in_chans=3,
         embed_dim=768,
@@ -352,16 +408,16 @@ class VisionTransformer(nn.Module):
         self.num_features = self.embed_dim = embed_dim
         self.num_heads = num_heads
         # --
-        self.patch_embed = PatchEmbed(
-            img_size=img_size[0],
+        self.patch_embed = PatchEmbed3D(
+            img_size=img_size,
             patch_size=patch_size,
             in_chans=in_chans,
             embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
         # --
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim), requires_grad=False)
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1],
-                                            int(self.patch_embed.num_patches**.5),
+        pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1],
+                                            self.patch_embed.grid_size,
                                             cls_token=False)
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
         # --
@@ -424,21 +480,97 @@ class VisionTransformer(nn.Module):
 
         return x
 
+
+    def load_pretrain(self, pretrain_path: str) -> None:
+        import torch.nn.functional as F
+        jax_dict = torch.load(pretrain_path, map_location="cpu")
+        if 'model' in jax_dict:
+            jax_dict = jax_dict['model']
+        new_dict = {}
+
+        def interpolate_pos_embedding(pre_pos_embed):
+            # Assumes pre-trained has 1 cls_token
+            if pre_pos_embed.shape[1] == self.pos_embed.shape[1] + 1:
+                cls_token, pretrained_pos_embed = (
+                    pre_pos_embed[:, :1, :],
+                    pre_pos_embed[:, 1:, :],
+                )
+            else:
+                pretrained_pos_embed = pre_pos_embed
+                cls_token = None
+                
+            new_num_patches = self.patch_embed.num_patches
+            old_num_patches = int(pretrained_pos_embed.shape[1] ** 0.5)
+            pretrained_pos_embed = pretrained_pos_embed.reshape(
+                1, old_num_patches, old_num_patches, -1
+            ).permute(0, 3, 1, 2)
+            pretrained_pos_embed = pretrained_pos_embed.unsqueeze(2)
+            
+            grid_size = self.patch_embed.grid_size
+            pretrained_pos_embed = F.interpolate(
+                pretrained_pos_embed,
+                size=grid_size,
+                mode="trilinear",
+                align_corners=False,
+            )
+            pretrained_pos_embed = pretrained_pos_embed.permute(0, 2, 3, 4, 1).reshape(
+                1, new_num_patches, -1
+            )
+            
+            # Since I-JEPA does not use cls_token, we return only pos_embed
+            return pretrained_pos_embed
+
+        def mean_kernel(patch_emb_weight):
+            patch_emb_weight = patch_emb_weight.mean(dim=1, keepdim=True)
+            # Expand to 3D: [embed_dim, 1, patch_d, patch_h, patch_w]
+            depth = self.patch_embed.patch_size[0]
+            # Assumes patch_emb_weight is 2D: [embed_dim, 1, H, W]
+            return patch_emb_weight.unsqueeze(2).repeat(1, 1, depth, 1, 1) / depth
+
+        def add_item(key, value):
+            new_dict[key] = value
+
+        for key, value in jax_dict.items():
+            if key == "cls_token":
+                pass # new_dict[key] = value
+            elif "patch_embed.proj.weight" in key:
+                if len(value.shape) == 4: # 2D weights
+                    add_item(key, mean_kernel(value))
+                else:
+                    add_item(key, value)
+            elif key == "pos_embed":
+                add_item(key, interpolate_pos_embedding(value))
+            else:
+                add_item(key, value)
+
+        msg = self.load_state_dict(new_dict, strict=False)
+        print(f"Loaded pretrain from {pretrain_path} with msg: {msg}")
+
     def interpolate_pos_encoding(self, x, pos_embed):
-        npatch = x.shape[1] - 1
-        N = pos_embed.shape[1] - 1
+        npatch = x.shape[1]
+        N = pos_embed.shape[1]
         if npatch == N:
             return pos_embed
-        class_emb = pos_embed[:, 0]
-        pos_embed = pos_embed[:, 1:]
+            
         dim = x.shape[-1]
-        pos_embed = nn.functional.interpolate(
-            pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
-            scale_factor=math.sqrt(npatch / N),
-            mode='bicubic',
+        grid_size = self.patch_embed.grid_size
+        # pos_embed: [1, N, dim] -> [1, dim, grid_size[0], grid_size[1], grid_size[2]]
+        pos_embed = pos_embed.reshape(1, grid_size[0], grid_size[1], grid_size[2], dim).permute(0, 4, 1, 2, 3)
+        
+        import math
+        ratio = (npatch / N) ** (1/3)
+        new_d = int(round(grid_size[0] * ratio))
+        new_h = int(round(grid_size[1] * ratio))
+        new_w = int(round(grid_size[2] * ratio))
+        
+        pos_embed = torch.nn.functional.interpolate(
+            pos_embed,
+            size=(new_d, new_h, new_w),
+            mode='trilinear',
+            align_corners=False,
         )
-        pos_embed = pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
-        return torch.cat((class_emb.unsqueeze(0), pos_embed), dim=1)
+        pos_embed = pos_embed.permute(0, 2, 3, 4, 1).view(1, -1, dim)
+        return pos_embed
 
 
 def vit_predictor(**kwargs):

@@ -1,0 +1,37 @@
+# Core ML / DL
+# torch==2.3.1+cu121 
+# torchvision==0.18.1+cu121 
+# torchaudio==2.3.1+cu121 
+timm==1.0.9
+einops==0.8.1
+focal-loss-torch==0.1.2
+
+# Medical imaging
+# monai
+# nibabel==5.3.2
+torchio==0.21.0
+PyWavelets==1.8.0
+
+# Scientific stack
+numpy
+scipy
+scikit-learn
+pandas
+
+# Visualization
+matplotlib
+seaborn
+opencv-python
+pillow
+
+# HuggingFace / utilities
+huggingface_hub
+tqdm
+gdown
+requests
+
+# Jupyter / experimentation
+ipykernel
+
+# System / monitoring
+nvitop
