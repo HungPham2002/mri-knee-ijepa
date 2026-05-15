@@ -41,7 +41,7 @@ from src.utils.logging import (
     grad_logger,
     AverageMeter)
 from src.utils.tensors import repeat_interleave_batch
-from src.datasets.imagenet1k import make_imagenet1k
+from src.datasets.3d_dess_dataset import make_dess3d
 
 from src.helper import (
     load_checkpoint,
@@ -101,7 +101,11 @@ def main(args, resume_preempt=False):
 
     # -- MASK
     allow_overlap = args['mask']['allow_overlap']  # whether to allow overlap b/w context and target blocks
-    patch_size = args['mask']['patch_size']  # patch-size for model training
+    patch_size = args['mask']['patch_size']
+    if isinstance(patch_size, int):
+        patch_size = (12, 16, 16) # default to exactly what the user wants for Knee MRI
+    if isinstance(args['data'].get('crop_size', None), int):
+        args['data']['crop_size'] = (120, 160, 160)
     num_enc_masks = args['mask']['num_enc_masks']  # number of context blocks
     min_keep = args['mask']['min_keep']  # min number of patches in context block
     enc_mask_scale = args['mask']['enc_mask_scale']  # scale of context blocks
@@ -180,7 +184,7 @@ def main(args, resume_preempt=False):
         allow_overlap=allow_overlap,
         min_keep=min_keep)
 
-    transform = make_transforms(
+    transform = make_transforms(training=True,
         crop_size=crop_size,
         crop_scale=crop_scale,
         gaussian_blur=use_gaussian_blur,
@@ -189,18 +193,16 @@ def main(args, resume_preempt=False):
         color_jitter=color_jitter)
 
     # -- init data-loaders/samplers
-    _, unsupervised_loader, unsupervised_sampler = make_imagenet1k(
+    _, unsupervised_loader, unsupervised_sampler = make_dess3d(
             transform=transform,
             batch_size=batch_size,
+            dataframe_path=args['data']['dataframe_path'],
+            mri_root=root_path,
             collator=mask_collator,
             pin_mem=pin_mem,
-            training=True,
             num_workers=num_workers,
             world_size=world_size,
             rank=rank,
-            root_path=root_path,
-            image_folder=image_folder,
-            copy_data=copy_data,
             drop_last=True)
     ipe = len(unsupervised_loader)
 

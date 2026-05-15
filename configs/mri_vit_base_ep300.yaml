@@ -1,0 +1,43 @@
+meta:
+  model_name: vit_base
+  use_bfloat16: true
+  load_checkpoint: false
+  read_checkpoint: null
+  copy_data: false
+  pred_depth: 4
+  pred_emb_dim: 384
+data:
+  dataframe_path: '/path/to/train.csv'
+  root_path: '/path/to/MRI_Numpy'
+  image_folder: ''
+  batch_size: 4
+  pin_mem: true
+  num_workers: 8
+  crop_size: [120, 160, 160]
+  crop_scale: [0.2, 1.0]
+  use_gaussian_blur: false
+  use_horizontal_flip: true
+  use_color_distortion: false
+  color_jitter_strength: 0.0
+mask:
+  allow_overlap: false # whether to allow overlap b/w context and target blocks
+  patch_size: [12, 16, 16] # patch-size for model training
+  num_enc_masks: 1
+  min_keep: 10
+  enc_mask_scale: [0.85, 1.0]
+  num_pred_masks: 4
+  pred_mask_scale: [0.15, 0.2]
+  aspect_ratio: [0.75, 1.5]
+optimization:
+  epochs: 300
+  weight_decay: 0.04
+  final_weight_decay: 0.4
+  lr: 0.001
+  warmup: 40
+  min_lr: 1.0e-05
+  start_lr: 0.0002
+  clip_grad: 3.0
+  skip_wd: ['pos_embed', 'mask_token', 'bias']
+logging:
+  folder: 'logs/mri_vit_base'
+  write_tag: 'mri_vit_base_300ep'

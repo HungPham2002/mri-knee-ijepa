@@ -19,10 +19,11 @@ logger = getLogger()
 
 class MaskCollator(object):
 
+
     def __init__(
         self,
-        input_size=(224, 224),
-        patch_size=16,
+        input_size=(120, 160, 160),
+        patch_size=(10, 16, 16),
         enc_mask_scale=(0.2, 0.8),
         pred_mask_scale=(0.2, 0.8),
         aspect_ratio=(0.3, 3.0),
@@ -32,18 +33,21 @@ class MaskCollator(object):
         allow_overlap=False
     ):
         super(MaskCollator, self).__init__()
-        if not isinstance(input_size, tuple):
-            input_size = (input_size, ) * 2
+        if isinstance(input_size, int):
+            input_size = (input_size, ) * 3
+        if isinstance(patch_size, int):
+            patch_size = (patch_size, ) * 3
         self.patch_size = patch_size
-        self.height, self.width = input_size[0] // patch_size, input_size[1] // patch_size
+        self.depth = input_size[0] // patch_size[0]
+        self.height, self.width = input_size[1] // patch_size[1], input_size[2] // patch_size[2]
         self.enc_mask_scale = enc_mask_scale
         self.pred_mask_scale = pred_mask_scale
         self.aspect_ratio = aspect_ratio
         self.nenc = nenc
         self.npred = npred
-        self.min_keep = min_keep  # minimum number of patches to keep
-        self.allow_overlap = allow_overlap  # whether to allow overlap b/w enc and pred masks
-        self._itr_counter = Value('i', -1)  # collator is shared across worker processes
+        self.min_keep = min_keep
+        self.allow_overlap = allow_overlap
+        self._itr_counter = Value('i', -1)
 
     def step(self):
         i = self._itr_counter
@@ -54,59 +58,61 @@ class MaskCollator(object):
 
     def _sample_block_size(self, generator, scale, aspect_ratio_scale):
         _rand = torch.rand(1, generator=generator).item()
-        # -- Sample block scale
         min_s, max_s = scale
         mask_scale = min_s + _rand * (max_s - min_s)
-        max_keep = int(self.height * self.width * mask_scale)
-        # -- Sample block aspect-ratio
+        max_keep = int(self.depth * self.height * self.width * mask_scale)
+        
         min_ar, max_ar = aspect_ratio_scale
-        aspect_ratio = min_ar + _rand * (max_ar - min_ar)
-        # -- Compute block height and width (given scale and aspect-ratio)
-        h = int(round(math.sqrt(max_keep * aspect_ratio)))
-        w = int(round(math.sqrt(max_keep / aspect_ratio)))
-        while h >= self.height:
-            h -= 1
-        while w >= self.width:
-            w -= 1
+        _rands = torch.rand(2, generator=generator).tolist()
+        ar_d_h = min_ar + _rands[0] * (max_ar - min_ar)
+        ar_h_w = min_ar + _rands[1] * (max_ar - min_ar)
+        
+        h = int(round((max_keep * ar_h_w / ar_d_h) ** (1 / 3.0)))
+        w = int(round(h / ar_h_w))
+        d = int(round(h * ar_d_h))
+        
+        while d >= self.depth: d -= 1
+        while h >= self.height: h -= 1
+        while w >= self.width: w -= 1
 
-        return (h, w)
+        d = max(1, d)
+        h = max(1, h)
+        w = max(1, w)
+
+        return (d, h, w)
 
     def _sample_block_mask(self, b_size, acceptable_regions=None):
-        h, w = b_size
+        d, h, w = b_size
 
         def constrain_mask(mask, tries=0):
-            """ Helper to restrict given mask to a set of acceptable regions """
             N = max(int(len(acceptable_regions)-tries), 0)
             for k in range(N):
                 mask *= acceptable_regions[k]
-        # --
-        # -- Loop to sample masks until we find a valid one
+
         tries = 0
         timeout = og_timeout = 20
         valid_mask = False
         while not valid_mask:
-            # -- Sample block top-left corner
-            top = torch.randint(0, self.height - h, (1,))
-            left = torch.randint(0, self.width - w, (1,))
-            mask = torch.zeros((self.height, self.width), dtype=torch.int32)
-            mask[top:top+h, left:left+w] = 1
-            # -- Constrain mask to a set of acceptable regions
+            top_d = torch.randint(0, self.depth - d + 1, (1,)).item() if self.depth > d else 0
+            top_h = torch.randint(0, self.height - h + 1, (1,)).item() if self.height > h else 0
+            left_w = torch.randint(0, self.width - w + 1, (1,)).item() if self.width > w else 0
+            
+            mask = torch.zeros((self.depth, self.height, self.width), dtype=torch.int32)
+            mask[top_d:top_d+d, top_h:top_h+h, left_w:left_w+w] = 1
+            
             if acceptable_regions is not None:
                 constrain_mask(mask, tries)
-            mask = torch.nonzero(mask.flatten())
-            # -- If mask too small try again
-            valid_mask = len(mask) > self.min_keep
+            mask_nz = torch.nonzero(mask.flatten())
+            valid_mask = len(mask_nz) > self.min_keep
             if not valid_mask:
                 timeout -= 1
                 if timeout == 0:
                     tries += 1
                     timeout = og_timeout
-                    logger.warning(f'Mask generator says: "Valid mask not found, decreasing acceptable-regions [{tries}]"')
-        mask = mask.squeeze()
-        # --
-        mask_complement = torch.ones((self.height, self.width), dtype=torch.int32)
-        mask_complement[top:top+h, left:left+w] = 0
-        # --
+        mask = mask_nz.squeeze()
+        mask_complement = torch.ones((self.depth, self.height, self.width), dtype=torch.int32)
+        mask_complement[top_d:top_d+d, top_h:top_h+h, left_w:left_w+w] = 0
+        
         return mask, mask_complement
 
     def __call__(self, batch):
@@ -135,8 +141,8 @@ class MaskCollator(object):
             aspect_ratio_scale=(1., 1.))
 
         collated_masks_pred, collated_masks_enc = [], []
-        min_keep_pred = self.height * self.width
-        min_keep_enc = self.height * self.width
+        min_keep_pred = self.depth * self.height * self.width
+        min_keep_enc = self.depth * self.height * self.width
         for _ in range(B):
 
             masks_p, masks_C = [], []
