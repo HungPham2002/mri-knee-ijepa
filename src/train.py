@@ -41,7 +41,7 @@ from src.utils.logging import (
     grad_logger,
     AverageMeter)
 from src.utils.tensors import repeat_interleave_batch
-from src.datasets.3d_dess_dataset import make_dess3d
+from src.datasets.dess_dataset import make_dess3d
 
 from src.helper import (
     load_checkpoint,
@@ -103,7 +103,7 @@ def main(args, resume_preempt=False):
     allow_overlap = args['mask']['allow_overlap']  # whether to allow overlap b/w context and target blocks
     patch_size = args['mask']['patch_size']
     if isinstance(patch_size, int):
-        patch_size = (12, 16, 16) # default to exactly what the user wants for Knee MRI
+        patch_size = (12, 16, 16) 
     if isinstance(args['data'].get('crop_size', None), int):
         args['data']['crop_size'] = (120, 160, 160)
     num_enc_masks = args['mask']['num_enc_masks']  # number of context blocks
@@ -115,20 +115,21 @@ def main(args, resume_preempt=False):
     # --
 
     # -- OPTIMIZATION
-    ema = args['optimization']['ema']
-    ipe_scale = args['optimization']['ipe_scale']  # scheduler scale factor (def: 1.0)
+    ema = args['optimization'].get('ema', [0.996, 1.0])
+    ipe_scale = args['optimization'].get('ipe_scale', 1.0)  # scheduler scale factor (def: 1.0)
     wd = float(args['optimization']['weight_decay'])
     final_wd = float(args['optimization']['final_weight_decay'])
     num_epochs = args['optimization']['epochs']
     warmup = args['optimization']['warmup']
     start_lr = args['optimization']['start_lr']
     lr = args['optimization']['lr']
-    final_lr = args['optimization']['final_lr']
+    final_lr = float(args['optimization'].get('final_lr', args['optimization'].get('min_lr', 1.0e-06)))
 
     # -- LOGGING
     folder = args['logging']['folder']
     tag = args['logging']['write_tag']
 
+    os.makedirs(folder, exist_ok=True)
     dump = os.path.join(folder, 'params-ijepa.yaml')
     with open(dump, 'w') as f:
         yaml.dump(args, f)

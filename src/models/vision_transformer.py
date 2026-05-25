@@ -225,14 +225,15 @@ class PatchEmbed(nn.Module):
 
 class PatchEmbed3D(nn.Module):
     """ 3D Volume to Patch Embedding """
-    def __init__(self, img_size=(120, 160, 160), patch_size=(10, 16, 16), in_chans=1, embed_dim=768):
+    def __init__(self, img_size=(120, 160, 160), patch_size=(12, 16, 16), in_chans=1, embed_dim=768):
         super().__init__()
         
         if isinstance(img_size, int):
             img_size = (img_size, img_size, img_size)
+        if isinstance(img_size, list) and len(img_size) == 1:
+            img_size = img_size[0]
         if isinstance(patch_size, int):
             patch_size = (patch_size, patch_size, patch_size)
-            
         self.img_size = img_size
         self.patch_size = patch_size
         self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1], img_size[2] // patch_size[2])
@@ -300,7 +301,7 @@ class VisionTransformerPredictor(nn.Module):
         self.predictor_pos_embed = nn.Parameter(torch.zeros(1, num_patches, predictor_embed_dim),
                                                 requires_grad=False)
         predictor_pos_embed = get_3d_sincos_pos_embed(self.predictor_pos_embed.shape[-1],
-                                                      kwargs.get('predictor_grid_size', (12, 10, 10)),
+                                                      kwargs.get('predictor_grid_size', (10, 10, 10)),
                                                       cls_token=False)
         self.predictor_pos_embed.data.copy_(torch.from_numpy(predictor_pos_embed).float().unsqueeze(0))
         # --
@@ -387,8 +388,8 @@ class VisionTransformer(nn.Module):
     def __init__(
         self,
         img_size=[120, 160, 160],
-        patch_size=16,
-        in_chans=3,
+        patch_size=[12, 16, 16],
+        in_chans=1,
         embed_dim=768,
         predictor_embed_dim=384,
         depth=12,
