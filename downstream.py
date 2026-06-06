@@ -5,12 +5,21 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 from focal_loss.focal_loss import FocalLoss
-from sklearn.metrics import accuracy_score, balanced_accuracy_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, cohen_kappa_score
+import matplotlib
+matplotlib.use("Agg")  # headless / no display on server
+import matplotlib.pyplot as plt
+import csv
+import glob
+import json
+import re
 
 from src.models import vision_transformer as vit
 from src.transforms import make_transforms
+
 
 class DownstreamDataset(Dataset):
     def __init__(self, df, mri_root, mri_transforms=None):
@@ -33,9 +42,8 @@ class DownstreamDataset(Dataset):
             else:
                 mri_data = npz_data[npz_data.files[0]]
         except Exception:
-            # Fallback nếu file lỗi
-            mri_data = np.zeros((120, 160, 160), dtype=np.float32)
-
+            raise FileNotFoundError(f"Could not load MRI data from {mri_path}")
+            
         # Dataset pretraining định dạng input là (1, D, H, W)
         mri_data = np.expand_dims(mri_data, 0)
 
@@ -99,20 +107,55 @@ def set_requires_grad(model, strategy, unfreeze_last_n=1):
         param.requires_grad = True
 
 
+def prune_checkpoints(ckpt_dir, keep_last_n):
+    """Giữ lại keep_last_n checkpoint mới nhất (theo epoch), xóa phần còn lại."""
+    ckpts = glob.glob(os.path.join(ckpt_dir, "ckpt_epoch*.pth"))
+
+    def epoch_of(p):
+        m = re.search(r"ckpt_epoch(\d+)\.pth", os.path.basename(p))
+        return int(m.group(1)) if m else -1
+
+    ckpts = sorted(ckpts, key=epoch_of)
+    for p in ckpts[:-keep_last_n]:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+@torch.no_grad()
+def evaluate(model, loader, device, desc):
+    model.eval()
+    preds, targets = [], []
+    for images, labels in tqdm(loader, desc=desc):
+        images, labels = images.to(device), labels.to(device)
+        outputs = model(images)
+        preds.extend(outputs.argmax(dim=1).cpu().numpy())
+        targets.extend(labels.cpu().numpy())
+    return {
+        "acc": accuracy_score(targets, preds),
+        "bacc": balanced_accuracy_score(targets, preds),
+        "qwk": cohen_kappa_score(targets, preds, weights="quadratic"),
+    }
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, default="/network-volume/hungph-data/data/SAG_3D_DESS_v2_full")
-    parser.add_argument("--mri_folder", type=str, default="/network-volume/hungph-data/data/SAG_3D_DESS_v2_full/MRI_Numpy")
-    parser.add_argument("--ckpt_path", type=str, default="/network-volume/hungph-data/mri-knee-ijepa/logs/mri_vit_base/mri_vit_base_300ep-ep100.pth.tar")
+    parser.add_argument("--data_root", type=str, default="/network-volume/hungph/data/SAG_3D_DESS_v2_full")
+    parser.add_argument("--mri_folder", type=str, default="/network-volume/hungph/data/SAG_3D_DESS_v2_full/MRI_Numpy")
+    parser.add_argument("--ckpt_path", type=str, default="/network-volume/hungph/mri-knee-ijepa/output/mri_vit_base_300ep-ep100.pth.tar")
     parser.add_argument("--strategy", type=str, choices=["linear_probe", "partial", "full"], default="linear_probe",
                         help="Tùy chọn fine-tune.")
     parser.add_argument("--unfreeze_last_n", type=int, default=4, help="Số block cuối của ViT cần unfreeze (nếu strategy=partial).")
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--save_after_epoch", type=int, default=10,
+                        help="Bắt đầu lưu checkpoint cải thiện từ epoch này (1-indexed).")
+    parser.add_argument("--keep_last_n", type=int, default=5,
+                        help="Số checkpoint gần nhất giữ lại.")
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--num_workers", type=int, default=8)
-    parser.add_argument("--output_dir", type=str, default="downstream_output")
+    parser.add_argument("--output_dir", type=str, default="output/downstream")
     
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -181,9 +224,31 @@ def main():
                 
     optimizer = torch.optim.AdamW(params_to_optimize, lr=args.lr)
     criterion = FocalLoss(gamma=1.2)
+    total_steps = args.epochs * len(train_loader)
+    scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
+
+    # steps_per_epoch = len(train_loader)
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer,
+    #     max_lr=3e-4,
+    #     epochs=args.epochs,
+    #     steps_per_epoch=steps_per_epoch,
+    #     pct_start = 0.05,
+    #     div_factor = 10.0,
+    #     final_div_factor= 1000.0
+    # )
     
     # 5. Training Loop
     best_val_acc = 0.0
+    
+    history = {
+    "train_loss": [], "val_loss": [],
+    "train_acc": [], "val_acc": [],
+    "train_bacc": [], "val_bacc": [],
+    "train_qwk": [], "val_qwk": [],
+    }
+    
+    patience_counter = 0
     best_model_path = os.path.join(args.output_dir, "best_downstream_model.pth")
     
     print("\nStarting Training...")
@@ -202,6 +267,7 @@ def main():
             loss = criterion(m(outputs), labels)
             loss.backward()
             optimizer.step()
+            scheduler.step()
             
             train_loss += loss.item() * images.size(0)
             preds = outputs.argmax(dim=1)
@@ -213,7 +279,8 @@ def main():
         train_loss /= len(train_loader.dataset)
         train_acc = accuracy_score(train_targets, train_preds)
         train_bacc = balanced_accuracy_score(train_targets, train_preds)
-        
+        train_qwk = cohen_kappa_score(train_targets, train_preds, weights="quadratic")
+
         # Validation Loop
         model.eval()
         val_loss = 0
@@ -238,38 +305,121 @@ def main():
         val_loss /= len(val_loader.dataset)
         val_acc = accuracy_score(val_targets, val_preds)
         val_bacc = balanced_accuracy_score(val_targets, val_preds)
+        val_qwk = cohen_kappa_score(val_targets, val_preds, weights="quadratic")
         
         print(f"\n--- Epoch {epoch+1} Summary ---")
-        print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | Train BAcc: {train_bacc:.4f}")
-        print(f"Val Loss: {val_loss:.4f}  | Val Acc: {val_acc:.4f} | Val BAcc: {val_bacc:.4f}")
+        print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | Train BAcc: {train_bacc:.4f} | Train QWK: {train_qwk:.4f}")
+        print(f"Val Loss: {val_loss:.4f}  | Val Acc: {val_acc:.4f} | Val BAcc: {val_bacc:.4f} | Val QWK: {val_qwk:.4f}")
         
-        if val_acc > best_val_acc:
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["train_acc"].append(train_acc)
+        history["val_acc"].append(val_acc)
+        history["train_bacc"].append(train_bacc)
+        history["val_bacc"].append(val_bacc)
+        history["train_qwk"].append(train_qwk)
+        history["val_qwk"].append(val_qwk)
+
+        improved = val_acc > best_val_acc
+        if improved:
             best_val_acc = val_acc
             torch.save(model.state_dict(), best_model_path)
             print(f">>> Saved new best model with Val Acc {val_acc:.4f}!")
-            
-    # 6. Test Loop
+            patience_counter = 0
+            # Lưu checkpoint theo epoch (chỉ khi cải thiện và >= save_after_epoch)
+            if (epoch + 1) >= args.save_after_epoch:
+                ep_ckpt = os.path.join(args.output_dir, f"ckpt_epoch{epoch+1}.pth")
+                torch.save(model.state_dict(), ep_ckpt)
+                prune_checkpoints(args.output_dir, args.keep_last_n)
+                print(f">>> Saved epoch checkpoint: {ep_ckpt}")
+        else:
+            patience_counter += 1
+            print(f">>> No improvement. Patience counter: {patience_counter}/{10}")
+            if patience_counter >= 100:
+                print("Early stopping triggered.")
+                break
+
+    # Plot training history
+    epochs_range = range(1, len(history["train_loss"]) + 1)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    axes[0, 0].plot(epochs_range, history["train_loss"], label="Train")
+    axes[0, 0].plot(epochs_range, history["val_loss"], label="Val")
+    axes[0, 0].set_title("Loss"); axes[0, 0].set_xlabel("Epoch"); axes[0, 0].legend()
+
+    axes[0, 1].plot(epochs_range, history["train_acc"], label="Train")
+    axes[0, 1].plot(epochs_range, history["val_acc"], label="Val")
+    axes[0, 1].set_title("Accuracy"); axes[0, 1].set_xlabel("Epoch"); axes[0, 1].legend()
+
+    axes[1, 0].plot(epochs_range, history["train_bacc"], label="Train")
+    axes[1, 0].plot(epochs_range, history["val_bacc"], label="Val")
+    axes[1, 0].set_title("Balanced Accuracy"); axes[1, 0].set_xlabel("Epoch"); axes[1, 0].legend()
+
+    axes[1, 1].plot(epochs_range, history["train_qwk"], label="Train")
+    axes[1, 1].plot(epochs_range, history["val_qwk"], label="Val")
+    axes[1, 1].set_title("Quadratic Weighted Kappa"); axes[1, 1].set_xlabel("Epoch"); axes[1, 1].legend()
+
+    plt.tight_layout()
+    plot_path = os.path.join(args.output_dir, "training_history.png")
+    plt.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved training history plot to {plot_path}")
+
+    # Log history ra CSV
+    history_csv = os.path.join(args.output_dir, "training_history.csv")
+    with open(history_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        keys = list(history.keys())
+        writer.writerow(["epoch"] + keys)
+        for i in range(len(history["train_loss"])):
+            writer.writerow([i + 1] + [history[k][i] for k in keys])
+    print(f"Saved training history CSV to {history_csv}")
+
+    # 6. Final Evaluation
     print("\n===============================")
-    print("Evaluating on Test Set...")
+    print("Final Evaluation...")
+
+    eval_loaders = {"train": train_loader, "val": val_loader, "test": test_loader}
+
+    # Tập hợp các checkpoint cần eval: best + 5 latest theo epoch
+    ckpt_list = []
     if os.path.exists(best_model_path):
-        model.load_state_dict(torch.load(best_model_path))
-        
-    model.eval()
-    test_preds, test_targets = [], []
-    
-    test_loader_tqdm = tqdm(test_loader, desc="[Test]")
-    with torch.no_grad():
-        for images, labels in test_loader_tqdm:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            preds = outputs.argmax(dim=1)
-            test_preds.extend(preds.cpu().numpy())
-            test_targets.extend(labels.cpu().numpy())
-            
-    test_acc = accuracy_score(test_targets, test_preds)
-    test_bacc = balanced_accuracy_score(test_targets, test_preds)
-    print(f"Test Accuracy: {test_acc:.4f}")
-    print(f"Test Balanced Accuracy: {test_bacc:.4f}")
+        ckpt_list.append(("best", best_model_path))
+
+    epoch_ckpts = glob.glob(os.path.join(args.output_dir, "ckpt_epoch*.pth"))
+
+    def _epoch_of(p):
+        m = re.search(r"ckpt_epoch(\d+)\.pth", os.path.basename(p))
+        return int(m.group(1)) if m else -1
+
+    epoch_ckpts = sorted(epoch_ckpts, key=_epoch_of)[-args.keep_last_n:]
+    for p in epoch_ckpts:
+        ckpt_list.append((f"epoch{_epoch_of(p)}", p))
+
+    results = []
+    for tag, path in ckpt_list:
+        print(f"\n>>> Evaluating checkpoint: {tag} ({path})")
+        model.load_state_dict(torch.load(path, map_location=device))
+        row = {"checkpoint": tag, "path": path}
+        for split, loader in eval_loaders.items():
+            metrics = evaluate(model, loader, device, desc=f"[{tag}:{split}]")
+            for mk, mv in metrics.items():
+                row[f"{split}_{mk}"] = mv
+            print(f"    {split}: Acc={metrics['acc']:.4f} | "
+                  f"BAcc={metrics['bacc']:.4f} | QWK={metrics['qwk']:.4f}")
+        results.append(row)
+
+    # Output kết quả eval ra CSV + JSON
+    eval_csv = os.path.join(args.output_dir, "eval_results.csv")
+    fieldnames = list(results[0].keys()) if results else []
+    with open(eval_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"\nSaved evaluation results to {eval_csv}")
+
+    with open(os.path.join(args.output_dir, "eval_results.json"), "w") as f:
+        json.dump(results, f, indent=2)
 
 if __name__ == "__main__":
     main()
