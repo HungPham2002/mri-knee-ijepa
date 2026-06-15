@@ -251,129 +251,129 @@ def main():
     patience_counter = 0
     best_model_path = os.path.join(args.output_dir, "best_downstream_model.pth")
     
-    print("\nStarting Training...")
-    for epoch in range(args.epochs):
-        model.train()
-        train_loss = 0
-        train_preds, train_targets = [], []
+    print("\nSkip Training...")
+    # for epoch in range(args.epochs):
+    #     model.train()
+    #     train_loss = 0
+    #     train_preds, train_targets = [], []
         
-        train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]")
-        for batch_idx, (images, labels) in enumerate(train_loader_tqdm):
-            images, labels = images.to(device), labels.to(device)
+    #     train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]")
+    #     for batch_idx, (images, labels) in enumerate(train_loader_tqdm):
+    #         images, labels = images.to(device), labels.to(device)
             
-            optimizer.zero_grad()
-            outputs = model(images)
-            m = nn.Softmax(dim=1)
-            loss = criterion(m(outputs), labels)
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
+    #         optimizer.zero_grad()
+    #         outputs = model(images)
+    #         m = nn.Softmax(dim=1)
+    #         loss = criterion(m(outputs), labels)
+    #         loss.backward()
+    #         optimizer.step()
+    #         scheduler.step()
             
-            train_loss += loss.item() * images.size(0)
-            preds = outputs.argmax(dim=1)
-            train_preds.extend(preds.cpu().numpy())
-            train_targets.extend(labels.cpu().numpy())
+    #         train_loss += loss.item() * images.size(0)
+    #         preds = outputs.argmax(dim=1)
+    #         train_preds.extend(preds.cpu().numpy())
+    #         train_targets.extend(labels.cpu().numpy())
             
-            train_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}")
+    #         train_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}")
                 
-        train_loss /= len(train_loader.dataset)
-        train_acc = accuracy_score(train_targets, train_preds)
-        train_bacc = balanced_accuracy_score(train_targets, train_preds)
-        train_qwk = cohen_kappa_score(train_targets, train_preds, weights="quadratic")
+    #     train_loss /= len(train_loader.dataset)
+    #     train_acc = accuracy_score(train_targets, train_preds)
+    #     train_bacc = balanced_accuracy_score(train_targets, train_preds)
+    #     train_qwk = cohen_kappa_score(train_targets, train_preds, weights="quadratic")
 
-        # Validation Loop
-        model.eval()
-        val_loss = 0
-        val_preds, val_targets = [], []
+    #     # Validation Loop
+    #     model.eval()
+    #     val_loss = 0
+    #     val_preds, val_targets = [], []
         
-        val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Val]")
-        with torch.no_grad():
-            for images, labels in val_loader_tqdm:
-                images, labels = images.to(device), labels.to(device)
-                outputs = model(images)
+    #     val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Val]")
+    #     with torch.no_grad():
+    #         for images, labels in val_loader_tqdm:
+    #             images, labels = images.to(device), labels.to(device)
+    #             outputs = model(images)
 
-                m = nn.Softmax(dim=1)
-                loss = criterion(m(outputs), labels)
+    #             m = nn.Softmax(dim=1)
+    #             loss = criterion(m(outputs), labels)
                 
-                val_loss += loss.item() * images.size(0)
-                preds = outputs.argmax(dim=1)
-                val_preds.extend(preds.cpu().numpy())
-                val_targets.extend(labels.cpu().numpy())
+    #             val_loss += loss.item() * images.size(0)
+    #             preds = outputs.argmax(dim=1)
+    #             val_preds.extend(preds.cpu().numpy())
+    #             val_targets.extend(labels.cpu().numpy())
                 
-                val_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}")
+    #             val_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}")
                 
-        val_loss /= len(val_loader.dataset)
-        val_acc = accuracy_score(val_targets, val_preds)
-        val_bacc = balanced_accuracy_score(val_targets, val_preds)
-        val_qwk = cohen_kappa_score(val_targets, val_preds, weights="quadratic")
+    #     val_loss /= len(val_loader.dataset)
+    #     val_acc = accuracy_score(val_targets, val_preds)
+    #     val_bacc = balanced_accuracy_score(val_targets, val_preds)
+    #     val_qwk = cohen_kappa_score(val_targets, val_preds, weights="quadratic")
         
-        print(f"\n--- Epoch {epoch+1} Summary ---")
-        print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | Train BAcc: {train_bacc:.4f} | Train QWK: {train_qwk:.4f}")
-        print(f"Val Loss: {val_loss:.4f}  | Val Acc: {val_acc:.4f} | Val BAcc: {val_bacc:.4f} | Val QWK: {val_qwk:.4f}")
+    #     print(f"\n--- Epoch {epoch+1} Summary ---")
+    #     print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | Train BAcc: {train_bacc:.4f} | Train QWK: {train_qwk:.4f}")
+    #     print(f"Val Loss: {val_loss:.4f}  | Val Acc: {val_acc:.4f} | Val BAcc: {val_bacc:.4f} | Val QWK: {val_qwk:.4f}")
         
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
-        history["train_acc"].append(train_acc)
-        history["val_acc"].append(val_acc)
-        history["train_bacc"].append(train_bacc)
-        history["val_bacc"].append(val_bacc)
-        history["train_qwk"].append(train_qwk)
-        history["val_qwk"].append(val_qwk)
+    #     history["train_loss"].append(train_loss)
+    #     history["val_loss"].append(val_loss)
+    #     history["train_acc"].append(train_acc)
+    #     history["val_acc"].append(val_acc)
+    #     history["train_bacc"].append(train_bacc)
+    #     history["val_bacc"].append(val_bacc)
+    #     history["train_qwk"].append(train_qwk)
+    #     history["val_qwk"].append(val_qwk)
 
-        improved = val_acc > best_val_acc
-        if improved:
-            best_val_acc = val_acc
-            torch.save(model.state_dict(), best_model_path)
-            print(f">>> Saved new best model with Val Acc {val_acc:.4f}!")
-            patience_counter = 0
-            # Lưu checkpoint theo epoch (chỉ khi cải thiện và >= save_after_epoch)
-            if (epoch + 1) >= args.save_after_epoch:
-                ep_ckpt = os.path.join(args.output_dir, f"ckpt_epoch{epoch+1}.pth")
-                torch.save(model.state_dict(), ep_ckpt)
-                prune_checkpoints(args.output_dir, args.keep_last_n)
-                print(f">>> Saved epoch checkpoint: {ep_ckpt}")
-        else:
-            patience_counter += 1
-            print(f">>> No improvement. Patience counter: {patience_counter}/{10}")
-            if patience_counter >= 100:
-                print("Early stopping triggered.")
-                break
+    #     improved = val_acc > best_val_acc
+    #     if improved:
+    #         best_val_acc = val_acc
+    #         torch.save(model.state_dict(), best_model_path)
+    #         print(f">>> Saved new best model with Val Acc {val_acc:.4f}!")
+    #         patience_counter = 0
+    #         # Lưu checkpoint theo epoch (chỉ khi cải thiện và >= save_after_epoch)
+    #         if (epoch + 1) >= args.save_after_epoch:
+    #             ep_ckpt = os.path.join(args.output_dir, f"ckpt_epoch{epoch+1}.pth")
+    #             torch.save(model.state_dict(), ep_ckpt)
+    #             prune_checkpoints(args.output_dir, args.keep_last_n)
+    #             print(f">>> Saved epoch checkpoint: {ep_ckpt}")
+    #     else:
+    #         patience_counter += 1
+    #         print(f">>> No improvement. Patience counter: {patience_counter}/{10}")
+    #         if patience_counter >= 100:
+    #             print("Early stopping triggered.")
+    #             break
 
-    # Plot training history
-    epochs_range = range(1, len(history["train_loss"]) + 1)
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # # Plot training history
+    # epochs_range = range(1, len(history["train_loss"]) + 1)
+    # fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    axes[0, 0].plot(epochs_range, history["train_loss"], label="Train")
-    axes[0, 0].plot(epochs_range, history["val_loss"], label="Val")
-    axes[0, 0].set_title("Loss"); axes[0, 0].set_xlabel("Epoch"); axes[0, 0].legend()
+    # axes[0, 0].plot(epochs_range, history["train_loss"], label="Train")
+    # axes[0, 0].plot(epochs_range, history["val_loss"], label="Val")
+    # axes[0, 0].set_title("Loss"); axes[0, 0].set_xlabel("Epoch"); axes[0, 0].legend()
 
-    axes[0, 1].plot(epochs_range, history["train_acc"], label="Train")
-    axes[0, 1].plot(epochs_range, history["val_acc"], label="Val")
-    axes[0, 1].set_title("Accuracy"); axes[0, 1].set_xlabel("Epoch"); axes[0, 1].legend()
+    # axes[0, 1].plot(epochs_range, history["train_acc"], label="Train")
+    # axes[0, 1].plot(epochs_range, history["val_acc"], label="Val")
+    # axes[0, 1].set_title("Accuracy"); axes[0, 1].set_xlabel("Epoch"); axes[0, 1].legend()
 
-    axes[1, 0].plot(epochs_range, history["train_bacc"], label="Train")
-    axes[1, 0].plot(epochs_range, history["val_bacc"], label="Val")
-    axes[1, 0].set_title("Balanced Accuracy"); axes[1, 0].set_xlabel("Epoch"); axes[1, 0].legend()
+    # axes[1, 0].plot(epochs_range, history["train_bacc"], label="Train")
+    # axes[1, 0].plot(epochs_range, history["val_bacc"], label="Val")
+    # axes[1, 0].set_title("Balanced Accuracy"); axes[1, 0].set_xlabel("Epoch"); axes[1, 0].legend()
 
-    axes[1, 1].plot(epochs_range, history["train_qwk"], label="Train")
-    axes[1, 1].plot(epochs_range, history["val_qwk"], label="Val")
-    axes[1, 1].set_title("Quadratic Weighted Kappa"); axes[1, 1].set_xlabel("Epoch"); axes[1, 1].legend()
+    # axes[1, 1].plot(epochs_range, history["train_qwk"], label="Train")
+    # axes[1, 1].plot(epochs_range, history["val_qwk"], label="Val")
+    # axes[1, 1].set_title("Quadratic Weighted Kappa"); axes[1, 1].set_xlabel("Epoch"); axes[1, 1].legend()
 
-    plt.tight_layout()
-    plot_path = os.path.join(args.output_dir, "training_history.png")
-    plt.savefig(plot_path, dpi=150)
-    plt.close(fig)
-    print(f"Saved training history plot to {plot_path}")
+    # plt.tight_layout()
+    # plot_path = os.path.join(args.output_dir, "training_history.png")
+    # plt.savefig(plot_path, dpi=150)
+    # plt.close(fig)
+    # print(f"Saved training history plot to {plot_path}")
 
-    # Log history ra CSV
-    history_csv = os.path.join(args.output_dir, "training_history.csv")
-    with open(history_csv, "w", newline="") as f:
-        writer = csv.writer(f)
-        keys = list(history.keys())
-        writer.writerow(["epoch"] + keys)
-        for i in range(len(history["train_loss"])):
-            writer.writerow([i + 1] + [history[k][i] for k in keys])
-    print(f"Saved training history CSV to {history_csv}")
+    # # Log history ra CSV
+    # history_csv = os.path.join(args.output_dir, "training_history.csv")
+    # with open(history_csv, "w", newline="") as f:
+    #     writer = csv.writer(f)
+    #     keys = list(history.keys())
+    #     writer.writerow(["epoch"] + keys)
+    #     for i in range(len(history["train_loss"])):
+    #         writer.writerow([i + 1] + [history[k][i] for k in keys])
+    # print(f"Saved training history CSV to {history_csv}")
 
     # 6. Final Evaluation
     print("\n===============================")
