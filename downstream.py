@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 from focal_loss.focal_loss import FocalLoss
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, cohen_kappa_score
@@ -138,11 +138,14 @@ def evaluate(model, loader, device, desc):
         "qwk": cohen_kappa_score(targets, preds, weights="quadratic"),
     }
 
-def main():
-    parser = argparse.ArgumentParser()
+def add_common_downstream_args(parser):
+    """Các argument dùng CHUNG cho mọi script downstream (I-JEPA / ImageNet / ctx).
+
+    Giữ ở một nơi để đảm bảo identical protocol giữa các backbone. Mỗi script chỉ
+    thêm phần riêng của nó (đường dẫn checkpoint / output_dir ...).
+    """
     parser.add_argument("--data_root", type=str, default="/home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full")
     parser.add_argument("--mri_folder", type=str, default="/home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full/MRI_Numpy")
-    parser.add_argument("--ckpt_path", type=str, default="/home/ubuntu/ecd_hungpham/mri-knee-ijepa/output/mri_vit_base_300ep-ep100.pth.tar")
     parser.add_argument("--strategy", type=str, choices=["linear_probe", "partial", "full"], default="linear_probe",
                         help="Tùy chọn fine-tune.")
     parser.add_argument("--unfreeze_last_n", type=int, default=4, help="Số block cuối của ViT cần unfreeze (nếu strategy=partial).")
@@ -152,11 +155,91 @@ def main():
                         help="Số checkpoint gần nhất giữ lại.")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight_decay", type=float, default=0.01)
+    # --- Recipe finetuning ViT pretrained (mấu chốt để full-FT không sụp) ---
+    parser.add_argument("--lr", type=float, default=5e-4,
+                        help="Peak LR: áp cho head + block trên cùng; block dưới giảm dần theo layer_decay.")
+    parser.add_argument("--layer_decay", type=float, default=0.75,
+                        help="Layer-wise LR decay kiểu MAE. 1.0 = tắt (mọi layer cùng LR).")
+    parser.add_argument("--warmup_epochs", type=float, default=5.0,
+                        help="Số epoch warmup tuyến tính trước khi cosine decay.")
+    parser.add_argument("--min_lr", type=float, default=1e-6, help="LR cuối của cosine schedule.")
+    parser.add_argument("--weight_decay", type=float, default=0.05)
+    parser.add_argument("--drop_path", type=float, default=0.1,
+                        help="Stochastic depth cho encoder. Tự động tắt (0.0) khi strategy=linear_probe.")
     parser.add_argument("--num_workers", type=int, default=8)
+    return parser
+
+
+def build_param_groups_lrd(model, base_lr, weight_decay, layer_decay):
+    """Layer-wise LR decay (MAE-style) cho ViTClassifier(encoder + head).
+
+    - Chỉ gồm param có requires_grad=True (tôn trọng strategy freeze/unfreeze).
+    - Block càng gần input -> LR càng nhỏ (scale = layer_decay ** (num_layers - id)),
+      giữ nguyên feature pretrained ở tầng thấp; head + LN cuối -> LR = base_lr.
+    - Không áp weight decay cho bias / LayerNorm / pos_embed (param 1 chiều).
+    """
+    encoder = model.encoder
+    num_layers = len(encoder.blocks) + 1  # các block + nhóm trên cùng (norm cuối + head)
+
+    def get_layer_id(name):
+        if name.startswith("encoder."):
+            sub = name[len("encoder."):]
+            if sub.startswith("patch_embed") or sub in ("pos_embed", "cls_token"):
+                return 0
+            if sub.startswith("blocks."):
+                return int(sub.split(".")[1]) + 1
+            return num_layers  # encoder.norm (LayerNorm cuối)
+        return num_layers      # head
+
+    groups = {}
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        layer_id = get_layer_id(name)
+        no_decay = param.ndim <= 1 or name.endswith(".bias") or "pos_embed" in name
+        gkey = (layer_id, no_decay)
+        if gkey not in groups:
+            scale = layer_decay ** (num_layers - layer_id)
+            groups[gkey] = {
+                "params": [],
+                "lr": base_lr * scale,
+                "weight_decay": 0.0 if no_decay else weight_decay,
+            }
+        groups[gkey]["params"].append(param)
+    return list(groups.values())
+
+
+def build_scheduler(optimizer, args, steps_per_epoch):
+    """Warmup tuyến tính -> cosine decay xuống min_lr (step theo từng iteration).
+
+    Mỗi param-group được scale từ base_lr riêng của nó, nên layer-wise LR decay
+    và schedule kết hợp đúng (early layers cũng warmup/cosine theo tỉ lệ của mình).
+    """
+    total_steps = max(1, args.epochs * steps_per_epoch)
+    warmup_steps = int(args.warmup_epochs * steps_per_epoch)
+    if warmup_steps > 0:
+        warmup = LinearLR(optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_steps)
+        cosine = CosineAnnealingLR(optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=args.min_lr)
+        return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
+    return CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=args.min_lr)
+
+
+def build_encoder(args):
+    """Dựng encoder ViT-B/16 3D (cùng cấu hình với pretraining).
+
+    Stochastic depth tự tắt cho linear_probe (encoder đóng băng -> tránh nhiễu
+    ngẫu nhiên vào feature dùng cho head).
+    """
+    drop_path = 0.0 if args.strategy == "linear_probe" else args.drop_path
+    return vit.vit_base(img_size=[120, 160, 160], patch_size=(12, 16, 16), drop_path_rate=drop_path)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    add_common_downstream_args(parser)
+    parser.add_argument("--ckpt_path", type=str, default="/home/ubuntu/ecd_hungpham/mri-knee-ijepa/output/mri_vit_base_300ep-ep100.pth.tar")
     parser.add_argument("--output_dir", type=str, default="output/downstream")
-    
+
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -185,8 +268,8 @@ def main():
     # 2. Build Model
     print("Building ViT model...")
     # Lấy param theo config của mri_vit_base_ep300.yaml
-    encoder = vit.vit_base(img_size=[120, 160, 160], patch_size=(12, 16, 16))
-    
+    encoder = build_encoder(args)
+
     if os.path.exists(args.ckpt_path):
         ckpt = torch.load(args.ckpt_path, map_location="cpu")
         # I-JEPA thường dùng target_encoder tốt hơn để downstream
@@ -214,35 +297,24 @@ def main():
 
 
 def run_downstream_experiment(model, train_loader, val_loader, test_loader, device, args):
-    # 4. Setup Optimizer
-    # QUAN TRỌNG: Chỉ set parameters cần update gradient cho AdamW
-    # Loại bỏ weight decay cho các bias/LayerNorm 
-    params_to_optimize = []
-    
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            if param.ndim <= 1 or 'bias' in name or 'norm' in name:
-                # Không áp dụng weight decay
-                params_to_optimize.append({'params': [param], 'weight_decay': 0.0})
-            else:
-                params_to_optimize.append({'params': [param], 'weight_decay': args.weight_decay})
-                
-    optimizer = torch.optim.AdamW(params_to_optimize, lr=args.lr)
+    # 4. Optimizer: layer-wise LR decay + loại weight decay cho norm/bias/pos_embed.
+    #    Đây là mấu chốt để full finetuning KHÔNG phá hỏng feature pretrained:
+    #    block càng thấp LR càng nhỏ (giữ feature), head + LN cuối LR = peak_lr.
+    param_groups = build_param_groups_lrd(
+        model, base_lr=args.lr, weight_decay=args.weight_decay, layer_decay=args.layer_decay)
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
     criterion = FocalLoss(gamma=1.2)
-    total_steps = args.epochs * len(train_loader)
-    scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
 
-    # steps_per_epoch = len(train_loader)
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #     optimizer,
-    #     max_lr=3e-4,
-    #     epochs=args.epochs,
-    #     steps_per_epoch=steps_per_epoch,
-    #     pct_start = 0.05,
-    #     div_factor = 10.0,
-    #     final_div_factor= 1000.0
-    # )
-    
+    # Warmup tuyến tính -> cosine decay xuống min_lr (step theo mỗi iteration).
+    scheduler = build_scheduler(optimizer, args, steps_per_epoch=len(train_loader))
+
+    group_lrs = [g["lr"] for g in param_groups]
+    print(f"=> Optimizer AdamW | {len(param_groups)} groups | peak_lr={args.lr:g} "
+          f"layer_decay={args.layer_decay} | lr[min={min(group_lrs):.2e}, max={max(group_lrs):.2e}] "
+          f"| wd={args.weight_decay}")
+    print(f"=> Scheduler: {args.warmup_epochs:g} warmup epoch(s) -> cosine to min_lr={args.min_lr:g} "
+          f"| drop_path={0.0 if args.strategy == 'linear_probe' else args.drop_path:g}")
+
     # 5. Training Loop
     best_val_acc = 0.0
     
