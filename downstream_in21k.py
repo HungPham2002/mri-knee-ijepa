@@ -87,6 +87,9 @@ def main():
     parser.add_argument("--weights_cache", type=str,
                         default="/home/ubuntu/ecd_hungpham/mri-knee-ijepa/pretrained/vit_base_patch16_224.orig_in21k.pth",
                         help="Nơi lưu/nạp trọng số ImageNet-21k đã chuẩn hoá (2D).")
+    parser.add_argument("--from_scratch", action="store_true",
+                        help="Bỏ qua mọi pretrained: train from scratch. Tự động ép "
+                             "cấu hình full finetuning (--strategy=full).")
     parser.add_argument("--strategy", type=str, choices=["linear_probe", "partial", "full"], default="linear_probe",
                         help="Tùy chọn fine-tune.")
     parser.add_argument("--unfreeze_last_n", type=int, default=4, help="Số block cuối của ViT cần unfreeze (nếu strategy=partial).")
@@ -128,10 +131,18 @@ def main():
     print("Building ViT model...")
     encoder = vit.vit_base(img_size=[120, 160, 160], patch_size=(12, 16, 16))
 
-    # Nạp trọng số ImageNet-21k (download+cache nếu cần) rồi inflate 2D->3D.
-    weights_path = prepare_in21k_weights(args.weights_cache, args.timm_model)
-    encoder.load_pretrain(weights_path)
-    print(f"Initialized encoder from ImageNet-21k weights: {weights_path}")
+    if args.from_scratch:
+        # Không pretrained: giữ nguyên khởi tạo ngẫu nhiên của encoder.
+        print("=> [Init: from scratch] Skipping pretrained weights (random init).")
+        # From scratch bắt buộc full finetuning để encoder được học.
+        if args.strategy != "full":
+            print(f"=> Overriding --strategy '{args.strategy}' -> 'full' for from-scratch training.")
+            args.strategy = "full"
+    else:
+        # Nạp trọng số ImageNet-21k (download+cache nếu cần) rồi inflate 2D->3D.
+        weights_path = prepare_in21k_weights(args.weights_cache, args.timm_model)
+        encoder.load_pretrain(weights_path)
+        print(f"Initialized encoder from ImageNet-21k weights: {weights_path}")
 
     model = ViTClassifier(encoder, num_classes=5)
 
