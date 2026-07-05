@@ -140,9 +140,9 @@ def evaluate(model, loader, device, desc):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, default="/network-volume/hungph/data/SAG_3D_DESS_v2_full")
-    parser.add_argument("--mri_folder", type=str, default="/network-volume/hungph/data/SAG_3D_DESS_v2_full/MRI_Numpy")
-    parser.add_argument("--ckpt_path", type=str, default="/network-volume/hungph/mri-knee-ijepa/output/mri_vit_base_300ep-ep100.pth.tar")
+    parser.add_argument("--data_root", type=str, default="/home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full")
+    parser.add_argument("--mri_folder", type=str, default="/home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full/MRI_Numpy")
+    parser.add_argument("--ckpt_path", type=str, default="/home/ubuntu/ecd_hungpham/mri-knee-ijepa/output/mri_vit_base_300ep-ep100.pth.tar")
     parser.add_argument("--strategy", type=str, choices=["linear_probe", "partial", "full"], default="linear_probe",
                         help="Tùy chọn fine-tune.")
     parser.add_argument("--unfreeze_last_n", type=int, default=4, help="Số block cuối của ViT cần unfreeze (nếu strategy=partial).")
@@ -208,7 +208,12 @@ def main():
     # 3. Setup Strategy
     set_requires_grad(model, args.strategy, args.unfreeze_last_n)
     model.to(device)
-    
+
+    # 4-6. Run the shared training + evaluation protocol
+    run_downstream_experiment(model, train_loader, val_loader, test_loader, device, args)
+
+
+def run_downstream_experiment(model, train_loader, val_loader, test_loader, device, args):
     # 4. Setup Optimizer
     # QUAN TRỌNG: Chỉ set parameters cần update gradient cho AdamW
     # Loại bỏ weight decay cho các bias/LayerNorm 

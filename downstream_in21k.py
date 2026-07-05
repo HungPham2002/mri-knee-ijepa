@@ -1,0 +1,147 @@
+"""
+Downstream benchmark cho backbone khởi tạo từ ImageNet-21k (inflated 2D->3D).
+
+Mục tiêu: fair benchmark với backbone pretrained bằng I-JEPA. Script này dùng
+CHÍNH XÁC cùng protocol (dataset, transforms, model head, optimizer, scheduler,
+loss, training loop, eval) như `downstream.py` -- toàn bộ phần đó được tái sử dụng
+qua `run_downstream_experiment` và các helper import từ `downstream.py`. Khác biệt
+DUY NHẤT là nguồn trọng số của encoder:
+
+  - `downstream.py`      : load checkpoint I-JEPA (target_encoder/encoder).
+  - `downstream_in21k.py`: load trọng số ViT-B/16 ImageNet-21k (timm), inflate
+                           2D->3D bằng `VisionTransformer.load_pretrain`.
+
+Trọng số ImageNet-21k được lấy qua timm (`vit_base_patch16_224.orig_in21k`). Lần
+đầu sẽ download, chuẩn hoá (bỏ cls token khỏi pos_embed để khớp với logic inflate
+trong `src/models/vision_transformer.py`) rồi lưu ra đĩa. Các lần sau nạp lại từ
+file đã lưu, không download lại.
+"""
+
+import os
+import argparse
+
+import torch
+import pandas as pd
+from torch.utils.data import DataLoader
+
+from src.models import vision_transformer as vit
+from src.transforms import make_transforms
+
+# Tái sử dụng nguyên vẹn protocol downstream để đảm bảo identical benchmark.
+from downstream import (
+    DownstreamDataset,
+    ViTClassifier,
+    set_requires_grad,
+    run_downstream_experiment,
+)
+
+
+def prepare_in21k_weights(cache_path: str, timm_model: str) -> str:
+    """Trả về đường dẫn tới file trọng số ImageNet-21k đã chuẩn hoá (vẫn là 2D).
+
+    Nếu file đã tồn tại -> dùng lại (không download). Nếu chưa -> dùng timm để
+    download trọng số pretrained, chuẩn hoá rồi lưu ra `cache_path` cho lần sau.
+
+    Chuẩn hoá: bỏ `cls_token` và cắt hàng cls khỏi `pos_embed`
+    ([1, 197, 768] -> [1, 196, 768]) để khớp với `load_pretrain`, vốn coi toàn bộ
+    pos_embed là grid patch thuần (14x14) rồi nội suy 3D sang grid của volume.
+    Việc inflate 2D->3D (mean-kernel cho patch conv, trilinear cho pos_embed) do
+    `VisionTransformer.load_pretrain` đảm nhiệm khi nạp.
+    """
+    if os.path.exists(cache_path):
+        print(f"=> Found cached ImageNet-21k weights: {cache_path}")
+        return cache_path
+
+    print(f"=> Cached weights not found. Downloading '{timm_model}' via timm...")
+    try:
+        import timm
+    except ImportError as e:
+        raise ImportError(
+            "Cần cài timm để download trọng số ImageNet-21k: `pip install timm`"
+        ) from e
+
+    # num_classes=0 -> chỉ lấy backbone (không có head/pre_logits thừa).
+    model = timm.create_model(timm_model, pretrained=True, num_classes=0)
+    state_dict = model.state_dict()
+
+    # Chuẩn hoá pos_embed: bỏ hàng cls token (vị trí 0) nếu có.
+    if "pos_embed" in state_dict:
+        pos_embed = state_dict["pos_embed"]
+        num_patch_tokens = model.patch_embed.num_patches  # 196 cho patch16/224
+        if pos_embed.shape[1] == num_patch_tokens + 1:
+            state_dict["pos_embed"] = pos_embed[:, 1:, :].contiguous()
+    state_dict.pop("cls_token", None)
+
+    os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+    torch.save(state_dict, cache_path)
+    print(f"=> Saved normalized ImageNet-21k weights to: {cache_path}")
+    return cache_path
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_root", type=str, default="/home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full")
+    parser.add_argument("--mri_folder", type=str, default="/home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full/MRI_Numpy")
+    parser.add_argument("--timm_model", type=str, default="vit_base_patch16_224.orig_in21k",
+                        help="Tên model timm dùng làm nguồn trọng số ImageNet-21k.")
+    parser.add_argument("--weights_cache", type=str,
+                        default="/home/ubuntu/ecd_hungpham/mri-knee-ijepa/pretrained/vit_base_patch16_224.orig_in21k.pth",
+                        help="Nơi lưu/nạp trọng số ImageNet-21k đã chuẩn hoá (2D).")
+    parser.add_argument("--strategy", type=str, choices=["linear_probe", "partial", "full"], default="linear_probe",
+                        help="Tùy chọn fine-tune.")
+    parser.add_argument("--unfreeze_last_n", type=int, default=4, help="Số block cuối của ViT cần unfreeze (nếu strategy=partial).")
+    parser.add_argument("--save_after_epoch", type=int, default=10,
+                        help="Bắt đầu lưu checkpoint cải thiện từ epoch này (1-indexed).")
+    parser.add_argument("--keep_last_n", type=int, default=5,
+                        help="Số checkpoint gần nhất giữ lại.")
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--output_dir", type=str, default="output/downstream_in21k")
+
+    args = parser.parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print(f"Using device: {device}")
+
+    # 1. Prepare Datasets (identical với downstream.py)
+    print("Loading dataframes...")
+    train_df = pd.read_csv(os.path.join(args.data_root, "train.csv"))
+    val_df = pd.read_csv(os.path.join(args.data_root, "validation.csv"))
+    test_df = pd.read_csv(os.path.join(args.data_root, "test.csv"))
+
+    train_transform = make_transforms(training=True)
+    eval_transform = make_transforms(training=False)
+
+    train_dataset = DownstreamDataset(train_df, args.mri_folder, mri_transforms=train_transform)
+    val_dataset = DownstreamDataset(val_df, args.mri_folder, mri_transforms=eval_transform)
+    test_dataset = DownstreamDataset(test_df, args.mri_folder, mri_transforms=eval_transform)
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+
+    # 2. Build Model (cùng kiến trúc encoder như downstream.py)
+    print("Building ViT model...")
+    encoder = vit.vit_base(img_size=[120, 160, 160], patch_size=(12, 16, 16))
+
+    # Nạp trọng số ImageNet-21k (download+cache nếu cần) rồi inflate 2D->3D.
+    weights_path = prepare_in21k_weights(args.weights_cache, args.timm_model)
+    encoder.load_pretrain(weights_path)
+    print(f"Initialized encoder from ImageNet-21k weights: {weights_path}")
+
+    model = ViTClassifier(encoder, num_classes=5)
+
+    # 3. Setup Strategy (identical)
+    set_requires_grad(model, args.strategy, args.unfreeze_last_n)
+    model.to(device)
+
+    # 4-6. Run the shared training + evaluation protocol (identical với downstream.py)
+    run_downstream_experiment(model, train_loader, val_loader, test_loader, device, args)
+
+
+if __name__ == "__main__":
+    main()
