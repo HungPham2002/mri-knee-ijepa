@@ -10,7 +10,7 @@ data:
   dataframe_path: '/network-volume/hungph/data/SAG_3D_DESS_v2_full/train.csv'
   root_path: '/network-volume/hungph/data/SAG_3D_DESS_v2_full/MRI_Numpy'
   image_folder: ''
-  batch_size: 8        
+  batch_size: 128        
   pin_mem: true
   num_workers: 128
   crop_size: [120, 160, 160]

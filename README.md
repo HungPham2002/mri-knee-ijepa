@@ -109,9 +109,6 @@ optimization:
   # lr / warmup / final_weight_decay / batch_size: hạ/điều chỉnh so R0 (xem file)
 ```
 
-> **Lưu ý:** các con số lr/ema/warmup/batch là **điểm khởi đầu để smoke-test**, KHÔNG phải
-> giá trị tối ưu — điều chỉnh sau khi xem log smoke-test.
-
 Để **tái tạo R0** cho ablation: `normalize: minmax`, `fix_enc_clamp: false`,
 `ema: [0.996, 1.0]`, `crop_scale: [0.2, 1.0]`, lr/warmup cũ.
 
