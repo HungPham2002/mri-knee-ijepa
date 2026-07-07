@@ -81,7 +81,10 @@ def init_model(
         embed_dim=encoder.embed_dim,
         predictor_embed_dim=pred_emb_dim,
         depth=pred_depth,
-        num_heads=encoder.num_heads)
+        num_heads=encoder.num_heads,
+        # R1 §4.4: lấy grid từ encoder thay vì hardcode (10,10,10) trong predictor.
+        # Đổi crop_size sẽ tự động khớp, tránh lệch pos-embed im lặng.
+        predictor_grid_size=encoder.patch_embed.grid_size)
 
     def init_weights(m):
         if isinstance(m, torch.nn.Linear):

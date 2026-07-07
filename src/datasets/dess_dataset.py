@@ -28,7 +28,11 @@ class DESSDataset3D(Dataset):
         if self.mri_transforms:
             mri_data = self.mri_transforms(mri_data)
 
-        mri_tensor = torch.tensor(mri_data, dtype=torch.float32)
+        # Transform mới (R1) đã trả về torch.FloatTensor -> tránh double-wrap.
+        if isinstance(mri_data, torch.Tensor):
+            mri_tensor = mri_data.float()
+        else:
+            mri_tensor = torch.as_tensor(mri_data, dtype=torch.float32)
         return mri_tensor, 0
 
 def make_dess3d(

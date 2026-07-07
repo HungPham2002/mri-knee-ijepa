@@ -50,8 +50,12 @@ class DownstreamDataset(Dataset):
         # Transform nếu có
         if self.mri_transforms:
             mri_data = self.mri_transforms(mri_data)
-        
-        mri_tensor = torch.tensor(mri_data, dtype=torch.float32)
+
+        # Transform mới (R1) đã trả về torch.FloatTensor -> tránh double-wrap.
+        if isinstance(mri_data, torch.Tensor):
+            mri_tensor = mri_data.float()
+        else:
+            mri_tensor = torch.as_tensor(mri_data, dtype=torch.float32)
         label = int(row["kl_grade"])
         return mri_tensor, label
 
@@ -252,8 +256,12 @@ def main():
     val_df = pd.read_csv(os.path.join(args.data_root, "validation.csv"))
     test_df = pd.read_csv(os.path.join(args.data_root, "test.csv"))
     
-    # Init transforms
-    train_transform = make_transforms(training=True)
+    # Init transforms (R1 §4.6 — parity normalization).
+    # Encoder R1 kỳ vọng input foreground z-score. Để giữ protocol downstream đổi
+    # DUY NHẤT normalization (không thêm confound spatial-aug như RandomResizedCrop3D vào
+    # benchmark công bằng), dùng transform normalization-only cho CẢ train và eval
+    # (deterministic). Mọi backbone (I-JEPA R1 / IN21k / from-scratch) dùng cùng transform này.
+    train_transform = make_transforms(training=False)
     eval_transform = make_transforms(training=False)
     
     # Init datasets

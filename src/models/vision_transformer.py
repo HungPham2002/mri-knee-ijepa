@@ -552,7 +552,10 @@ class VisionTransformer(nn.Module):
         N = pos_embed.shape[1]
         if npatch == N:
             return pos_embed
-            
+        # TODO(R1): nhánh dưới dùng ratio=(npatch/N)**(1/3) resize đều 3 trục -> chỉ đúng khi
+        # grid gần đẳng hướng. Hiện KHÔNG trigger trong pretrain (npatch==N). Nếu sau này input
+        # đổi kích thước (R3 full-FOV), cần resize theo từng trục dựa trên grid thật, không đều.
+
         dim = x.shape[-1]
         grid_size = self.patch_embed.grid_size
         # pos_embed: [1, N, dim] -> [1, dim, grid_size[0], grid_size[1], grid_size[2]]

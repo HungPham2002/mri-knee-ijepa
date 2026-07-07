@@ -30,7 +30,8 @@ class MaskCollator(object):
         nenc=1,
         npred=2,
         min_keep=4,
-        allow_overlap=False
+        allow_overlap=False,
+        fix_enc_clamp=False
     ):
         super(MaskCollator, self).__init__()
         if isinstance(input_size, int):
@@ -47,6 +48,10 @@ class MaskCollator(object):
         self.npred = npred
         self.min_keep = min_keep
         self.allow_overlap = allow_overlap
+        # R1 §4.3: khi True, cho phép cạnh block đạt tối đa = grid dim (dùng min thay vì
+        # clamp `while >=` vốn ép cạnh xuống <= grid-1). Sửa erosion không mong muốn khiến
+        # enc block không bao giờ đạt scale cấu hình (grid chỉ 10). False -> hành vi R0.
+        self.fix_enc_clamp = fix_enc_clamp
         self._itr_counter = Value('i', -1)
 
     def step(self):
@@ -71,9 +76,17 @@ class MaskCollator(object):
         w = int(round(h / ar_h_w))
         d = int(round(h * ar_d_h))
         
-        while d >= self.depth: d -= 1
-        while h >= self.height: h -= 1
-        while w >= self.width: w -= 1
+        if self.fix_enc_clamp:
+            # R1: cho phép cạnh đạt tối đa = grid dim (không kéo xuống dưới scale cấu hình).
+            # Pred block (scale nhỏ) cạnh nhỏ nên không chạm clamp -> chỉ enc block hưởng lợi.
+            d = min(d, self.depth)
+            h = min(h, self.height)
+            w = min(w, self.width)
+        else:
+            # R0: erosion cũ ép cạnh xuống <= grid-1.
+            while d >= self.depth: d -= 1
+            while h >= self.height: h -= 1
+            while w >= self.width: w -= 1
 
         d = max(1, d)
         h = max(1, h)
@@ -114,6 +127,34 @@ class MaskCollator(object):
         mask_complement[top_d:top_d+d, top_h:top_h+h, left_w:left_w+w] = 0
         
         return mask, mask_complement
+
+    def log_effective_fractions(self, batch_size=8, num_batches=4):
+        """Đo minh bạch mask fractions bằng cách chạy collator trên vài batch giả.
+
+        Trả về dict:
+          - context_fraction: mean(len(enc_mask)) / num_patches  (context thực encoder thấy)
+          - target_fraction_per_block: mean(len(pred_mask)) / num_patches
+          - total_target_fraction: target_fraction_per_block * npred (xấp xỉ, có thể overlap)
+        Không ảnh hưởng training; chỉ để log INFO lúc khởi động.
+        """
+        num_patches = self.depth * self.height * self.width
+        enc_lens, pred_lens = [], []
+        dummy = [(torch.zeros(1, *[self.patch_size[i] * s for i, s in
+                                   enumerate((self.depth, self.height, self.width))]), 0)
+                 for _ in range(batch_size)]
+        for _ in range(num_batches):
+            _, masks_enc, masks_pred = self.__call__(dummy)
+            # masks_enc: list(nenc) of tensor (B, keep_enc); masks_pred: list(npred) of (B, keep_pred)
+            enc_lens.append(float(masks_enc[0].shape[1]))
+            pred_lens.append(float(masks_pred[0].shape[1]))
+        ctx = sum(enc_lens) / len(enc_lens) / num_patches
+        tgt = sum(pred_lens) / len(pred_lens) / num_patches
+        return {
+            'num_patches': num_patches,
+            'context_fraction': ctx,
+            'target_fraction_per_block': tgt,
+            'total_target_fraction': tgt * self.npred,
+        }
 
     def __call__(self, batch):
         '''

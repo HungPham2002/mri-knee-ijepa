@@ -5,21 +5,15 @@
 set -e
 
 python downstream_in21k.py \
---data_root /home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full \
---mri_folder /home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full/MRI_Numpy \
+--data_root /network-volume/hungph/data/SAG_3D_DESS_v2_full \
+--mri_folder /network-volume/hungph/data/SAG_3D_DESS_v2_full/MRI_Numpy \
 --strategy linear_probe \
 --unfreeze_last_n 4 \
---output_dir /home/ubuntu/ecd_hungpham/mri-knee-ijepa/logs/downstream_in21k_linear_probe
+--output_dir /network-volume/hungph/mri-knee-ijepa/logs/downstream_in21k_linear_probe
 
 python downstream_in21k.py \
---data_root /home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full \
---mri_folder /home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full/MRI_Numpy \
+--data_root /network-volume/hungph/data/SAG_3D_DESS_v2_full \
+--mri_folder /network-volume/hungph/data/SAG_3D_DESS_v2_full/MRI_Numpy \
 --strategy partial \
 --unfreeze_last_n 4 \
---output_dir /home/ubuntu/ecd_hungpham/mri-knee-ijepa/logs/downstream_in21k_partial
-
-python downstream_in21k.py \
---data_root /home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full \
---mri_folder /home/ubuntu/ecd_hungpham/data/SAG_3D_DESS_v2_full/MRI_Numpy \
---strategy full \
---output_dir /home/ubuntu/ecd_hungpham/mri-knee-ijepa/logs/downstream_in21k_full
+--output_dir /network-volume/hungph/mri-knee-ijepa/logs/downstream_in21k_partial

@@ -85,10 +85,14 @@ def main(args, resume_preempt=False):
         torch.cuda.set_device(device)
 
     # -- DATA
-    use_gaussian_blur = args['data']['use_gaussian_blur']
-    use_horizontal_flip = args['data']['use_horizontal_flip']
-    use_color_distortion = args['data']['use_color_distortion']
-    color_jitter = args['data']['color_jitter_strength']
+    # R1: normalization + flip 3D tự viết. Đọc bằng .get() với default an toàn để
+    # config R0 cũ (có use_gaussian_blur,...) lẫn config R1 mới đều không vỡ.
+    normalize = args['data'].get('normalize', 'foreground_zscore')  # R0='minmax'
+    fg_method = args['data'].get('fg_method', 'percentile')
+    p_bg = args['data'].get('p_bg', 20)
+    use_flip = args['data'].get('use_flip', args['data'].get('use_horizontal_flip', True))
+    flip_axis = args['data'].get('flip_axis', -1)
+    use_affine = args['data'].get('use_affine', False)
     # --
     batch_size = args['data']['batch_size']
     pin_mem = args['data']['pin_mem']
@@ -112,6 +116,7 @@ def main(args, resume_preempt=False):
     num_pred_masks = args['mask']['num_pred_masks']  # number of target blocks
     pred_mask_scale = args['mask']['pred_mask_scale']  # scale of target blocks
     aspect_ratio = args['mask']['aspect_ratio']  # aspect ratio of target blocks
+    fix_enc_clamp = args['mask'].get('fix_enc_clamp', False)  # R1 §4.3; False=R0
     # --
 
     # -- OPTIMIZATION
@@ -124,6 +129,9 @@ def main(args, resume_preempt=False):
     start_lr = args['optimization']['start_lr']
     lr = args['optimization']['lr']
     final_lr = float(args['optimization'].get('final_lr', args['optimization'].get('min_lr', 1.0e-06)))
+    # R1 §4.5: variance regularization (VICReg-style), mặc định TẮT. Chỉ bật khi vẫn collapse.
+    # LƯU Ý: đây là stabilization mượn từ VICReg, KHÔNG phải đóng góp của paper.
+    var_reg_weight = float(args['optimization'].get('var_reg_weight', 0.0))
 
     # -- LOGGING
     folder = args['logging']['folder']
@@ -159,6 +167,7 @@ def main(args, resume_preempt=False):
                            ('%d', 'epoch'),
                            ('%d', 'itr'),
                            ('%.5f', 'loss'),
+                           ('%.5f', 'feat_std'),  # R1 §4.5: proxy chống collapse (->0 = collapse)
                            ('%.5f', 'mask-A'),
                            ('%.5f', 'mask-B'),
                            ('%d', 'time (ms)'))
@@ -183,15 +192,30 @@ def main(args, resume_preempt=False):
         nenc=num_enc_masks,
         npred=num_pred_masks,
         allow_overlap=allow_overlap,
-        min_keep=min_keep)
+        min_keep=min_keep,
+        fix_enc_clamp=fix_enc_clamp)
 
+    # R1 §4.3: log mask fractions minh bạch lúc khởi động (chỉ rank 0).
+    try:
+        frac = mask_collator.log_effective_fractions()
+        logger.info('[mask] fix_enc_clamp=%s | context_fraction=%.3f | '
+                    'target/block=%.3f | total_target=%.3f | num_patches=%d'
+                    % (fix_enc_clamp, frac['context_fraction'],
+                       frac['target_fraction_per_block'], frac['total_target_fraction'],
+                       frac['num_patches']))
+    except Exception as e:
+        logger.warning(f'log_effective_fractions failed: {e}')
+
+    # R1 §4.1: pipeline 3D tự viết (bỏ torchio). color_* / gaussian_blur bị bỏ qua (MRI).
     transform = make_transforms(training=True,
         crop_size=crop_size,
         crop_scale=crop_scale,
-        gaussian_blur=use_gaussian_blur,
-        horizontal_flip=use_horizontal_flip,
-        color_distortion=use_color_distortion,
-        color_jitter=color_jitter)
+        normalize=normalize,
+        fg_method=fg_method,
+        p_bg=p_bg,
+        use_flip=use_flip,
+        flip_axis=flip_axis,
+        use_affine=use_affine)
 
     # -- init data-loaders/samplers
     _, unsupervised_loader, unsupervised_sampler = make_dess3d(
@@ -299,16 +323,28 @@ def main(args, resume_preempt=False):
                     with torch.no_grad():
                         h = target_encoder(imgs)
                         h = F.layer_norm(h, (h.size(-1),))  # normalize over feature-dim
+                        # R1 §4.5: proxy chống collapse — độ phân tán trung bình theo feature-dim
+                        # across batch×token, đo TRƯỚC khi mask (dùng .detach(), không ảnh gradient).
+                        feat_std = h.detach().float().std(dim=(0, 1)).mean()
                         B = len(h)
                         # -- create targets (masked regions of h)
                         h = apply_masks(h, masks_pred)
                         h = repeat_interleave_batch(h, B, repeat=len(masks_enc))
-                        return h
+                        return h, feat_std
 
                 def forward_context():
                     z = encoder(imgs, masks_enc)
                     z = predictor(z, masks_enc, masks_pred)
                     return z
+
+                def variance_reg(*tensors):
+                    # VICReg-style: phạt khi std theo feature-dim tụt dưới 1 (mượn stabilization).
+                    reg = 0.0
+                    for t in tensors:
+                        t = t.float()
+                        std = torch.sqrt(t.var(dim=0) + 1e-4)
+                        reg = reg + torch.mean(F.relu(1.0 - std))
+                    return reg
 
                 def loss_fn(z, h):
                     loss = F.smooth_l1_loss(z, h)
@@ -317,9 +353,11 @@ def main(args, resume_preempt=False):
 
                 # Step 1. Forward
                 with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=use_bfloat16):
-                    h = forward_target()
+                    h, feat_std = forward_target()
                     z = forward_context()
                     loss = loss_fn(z, h)
+                    if var_reg_weight > 0:
+                        loss = loss + var_reg_weight * variance_reg(z, h)
 
                 #  Step 2. Backward & step
                 if use_bfloat16:
@@ -338,22 +376,24 @@ def main(args, resume_preempt=False):
                     for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
                         param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
 
-                return (float(loss), _new_lr, _new_wd, grad_stats)
-            (loss, _new_lr, _new_wd, grad_stats), etime = gpu_timer(train_step)
+                return (float(loss), float(feat_std), _new_lr, _new_wd, grad_stats)
+            (loss, feat_std_val, _new_lr, _new_wd, grad_stats), etime = gpu_timer(train_step)
             loss_meter.update(loss)
             time_meter.update(etime)
 
             # -- Logging
             def log_stats():
-                csv_logger.log(epoch + 1, itr, loss, maskA_meter.val, maskB_meter.val, etime)
+                csv_logger.log(epoch + 1, itr, loss, feat_std_val, maskA_meter.val, maskB_meter.val, etime)
                 if (itr % log_freq == 0) or np.isnan(loss) or np.isinf(loss):
                     logger.info('[%d, %5d] loss: %.3f '
+                                'feat_std: %.3f '
                                 'masks: %.1f %.1f '
                                 '[wd: %.2e] [lr: %.2e] '
                                 '[mem: %.2e] '
                                 '(%.1f ms)'
                                 % (epoch + 1, itr,
                                    loss_meter.avg,
+                                   feat_std_val,
                                    maskA_meter.avg,
                                    maskB_meter.avg,
                                    _new_wd,

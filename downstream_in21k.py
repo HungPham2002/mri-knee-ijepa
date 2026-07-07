@@ -105,7 +105,8 @@ def main():
     val_df = pd.read_csv(os.path.join(args.data_root, "validation.csv"))
     test_df = pd.read_csv(os.path.join(args.data_root, "test.csv"))
 
-    train_transform = make_transforms(training=True)
+    # R1 §4.6 — parity: normalization-only cho cả train và eval (xem chú thích trong downstream.py).
+    train_transform = make_transforms(training=False)
     eval_transform = make_transforms(training=False)
 
     train_dataset = DownstreamDataset(train_df, args.mri_folder, mri_transforms=train_transform)
