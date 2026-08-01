@@ -261,7 +261,7 @@ def main():
     # DUY NHẤT normalization (không thêm confound spatial-aug như RandomResizedCrop3D vào
     # benchmark công bằng), dùng transform normalization-only cho CẢ train và eval
     # (deterministic). Mọi backbone (I-JEPA R1 / IN21k / from-scratch) dùng cùng transform này.
-    train_transform = make_transforms(training=False)
+    train_transform = make_transforms(training=True)
     eval_transform = make_transforms(training=False)
     
     # Init datasets

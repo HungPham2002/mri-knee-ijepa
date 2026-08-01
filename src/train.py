@@ -170,6 +170,11 @@ def main(args, resume_preempt=False):
                            ('%.5f', 'feat_std'),  # R1 §4.5: proxy chống collapse (->0 = collapse)
                            ('%.5f', 'mask-A'),
                            ('%.5f', 'mask-B'),
+                           ('%.3e', 'lr'),
+                           ('%.3e', 'wd'),
+                           ('%.5f', 'momentum'),
+                           ('%.3e', 'grad_norm'),
+                           ('%.1f', 'mem (MB)'),
                            ('%d', 'time (ms)'))
 
     # -- init model
@@ -376,14 +381,17 @@ def main(args, resume_preempt=False):
                     for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
                         param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
 
-                return (float(loss), float(feat_std), _new_lr, _new_wd, grad_stats)
-            (loss, feat_std_val, _new_lr, _new_wd, grad_stats), etime = gpu_timer(train_step)
+                return (float(loss), float(feat_std), _new_lr, _new_wd, grad_stats, m)
+            (loss, feat_std_val, _new_lr, _new_wd, grad_stats, m_val), etime = gpu_timer(train_step)
             loss_meter.update(loss)
             time_meter.update(etime)
 
             # -- Logging
             def log_stats():
-                csv_logger.log(epoch + 1, itr, loss, feat_std_val, maskA_meter.val, maskB_meter.val, etime)
+                grad_norm_val = grad_stats.avg if grad_stats is not None else 0.
+                mem_val = torch.cuda.max_memory_allocated() / 1024.**2
+                csv_logger.log(epoch + 1, itr, loss, feat_std_val, maskA_meter.val, maskB_meter.val,
+                                _new_lr, _new_wd, m_val, grad_norm_val, mem_val, etime)
                 if (itr % log_freq == 0) or np.isnan(loss) or np.isinf(loss):
                     logger.info('[%d, %5d] loss: %.3f '
                                 'feat_std: %.3f '
@@ -398,7 +406,7 @@ def main(args, resume_preempt=False):
                                    maskB_meter.avg,
                                    _new_wd,
                                    _new_lr,
-                                   torch.cuda.max_memory_allocated() / 1024.**2,
+                                   mem_val,
                                    time_meter.avg))
 
                     if grad_stats is not None:
